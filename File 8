@@ -1,1 +1,154 @@
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+import matplotlib.pyplot as plt
+from PIL import Image, ImageDraw
+import numpy as np
+import random
+from tqdm import tqdm
+
+# -------------------------------
+# Dataset: Synthetic Sinkhole Images
+# -------------------------------
+
+class SyntheticSinkholeDataset(Dataset):
+    """
+    Creates grayscale synthetic images with random circular sinkholes.
+    """
+
+    def __init__(self, num_images=200, image_size=128):
+        self.num_images = num_images
+        self.image_size = image_size
+        self.transform = transforms.ToTensor()
+
+    def __len__(self):
+        return self.num_images
+
+    def __getitem__(self, idx):
+        img = Image.new("L", (self.image_size, self.image_size), 0)
+        mask = Image.new("L", (self.image_size, self.image_size), 0)
+
+        draw_img = ImageDraw.Draw(img)
+        draw_mask = ImageDraw.Draw(mask)
+
+        for _ in range(random.randint(1, 3)):
+            x = random.randint(10, self.image_size - 10)
+            y = random.randint(10, self.image_size - 10)
+            r = random.randint(5, 15)
+            bbox = (x - r, y - r, x + r, y + r)
+            draw_img.ellipse(bbox, fill=255)
+            draw_mask.ellipse(bbox, fill=255)
+
+        return self.transform(img), self.transform(mask)
+
+# -------------------------------
+# Model: U-Net
+# -------------------------------
+
+class UNet(nn.Module):
+    """
+    A simplified U-Net for binary segmentation.
+    """
+
+    def __init__(self):
+        super(UNet, self).__init__()
+
+        def conv_block(in_channels, out_channels):
+            return nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, 3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(out_channels, out_channels, 3, padding=1),
+                nn.ReLU(inplace=True),
+            )
+
+        self.down1 = conv_block(1, 64)
+        self.pool1 = nn.MaxPool2d(2)
+        self.down2 = conv_block(64, 128)
+        self.pool2 = nn.MaxPool2d(2)
+        self.bridge = conv_block(128, 256)
+        self.up1 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.upconv1 = conv_block(256, 128)
+        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.upconv2 = conv_block(128, 64)
+        self.final = nn.Conv2d(64, 1, kernel_size=1)
+
+    def forward(self, x):
+        d1 = self.down1(x)
+        p1 = self.pool1(d1)
+        d2 = self.down2(p1)
+        p2 = self.pool2(d2)
+        bridge = self.bridge(p2)
+        u1 = self.up1(bridge)
+        u1 = self.upconv1(torch.cat([u1, d2], dim=1))
+        u2 = self.up2(u1)
+        u2 = self.upconv2(torch.cat([u2, d1], dim=1))
+        return torch.sigmoid(self.final(u2))
+
+# -------------------------------
+# Training Loop
+# -------------------------------
+
+def train_model(model, dataset, device, epochs=10, batch_size=8, lr=1e-3):
+    """
+    Trains the model on the provided dataset.
+    """
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.BCELoss()
+
+    model.to(device)
+
+    for epoch in range(epochs):
+        model.train()
+        running_loss = 0.0
+        for imgs, masks in tqdm(loader, desc=f"Epoch {epoch+1}/{epochs}"):
+            imgs, masks = imgs.to(device), masks.to(device)
+            preds = model(imgs)
+            loss = criterion(preds, masks)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+
+        print(f"[Epoch {epoch+1}] Loss: {running_loss / len(loader):.4f}")
+
+# -------------------------------
+# Visualization
+# -------------------------------
+
+def plot_prediction(model, dataset, device):
+    """
+    Plots one prediction from the dataset.
+    """
+    model.eval()
+    idx = torch.randint(0, len(dataset), (1,)).item()
+    img, mask = dataset[idx]
+
+    with torch.no_grad():
+        pred = model(img.unsqueeze(0).to(device)).cpu().squeeze().numpy()
+
+    fig, axs = plt.subplots(1, 3, figsize=(10, 3))
+    axs[0].imshow(img.squeeze(), cmap='gray')
+    axs[0].set_title("Input Image")
+    axs[1].imshow(mask.squeeze(), cmap='gray')
+    axs[1].set_title("Ground Truth")
+    axs[2].imshow(pred > 0.5, cmap='gray')
+    axs[2].set_title("Prediction")
+    plt.tight_layout()
+    plt.show()
+
+# -------------------------------
+# Main Execution
+# -------------------------------
+
+def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dataset = SyntheticSinkholeDataset(num_images=200)
+    model = UNet()
+    train_model(model, dataset, device=device, epochs=10)
+    plot_prediction(model, dataset, device=device)
+
+if __name__ == "__main__":
+    main()
 
